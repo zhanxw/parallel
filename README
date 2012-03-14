@@ -1,0 +1,18 @@
+Usage
+=====
+
+Pipe your command to parallel. 
+For example:
+
+host> seq 5 |xargs -i echo sleep {} |shuf
+sleep 3
+sleep 4
+sleep 1
+sleep 5
+sleep 2
+
+Then you can use parallel to run those 5 commands by:
+
+host> seq 5 |xargs -i echo sleep {} |shuf |parallel
+
+

@@ -1,0 +1,196 @@
+#!/net/nfsb/dumbo/home/zhanxw/bin/python
+import sys, os
+import time
+import multiprocessing
+import random
+from collections import deque
+from optparse import OptionParser
+
+def getParser():
+    usage = "%prog -f FILE1 FILE2 ..."
+    version = "%prog 1.0 (Jan 17, 2010)"
+    description = "Batch run jobs with feathers: " + \
+        "1. Controlling simultaneously job numbers " + \
+        "2. Read commands from STDIN " + \
+        "3. Allowed specified interval before submitting jobs " + \
+        "4. Detail log file record jobs status "
+
+    parser = OptionParser(usage = usage, version = version, description = description)
+    parser.add_option("-d", "--delay", dest="delay", type="int", default=2, 
+                      help="delay NUM seconds before submitting each job", metavar="NUM")
+    parser.add_option("-f", "--file", dest="fileName", help="run script named as FILE or read STDIN", metavar="FILE", default="-")
+    parser.add_option("-l", "--logfile", dest="logFileName",
+                      help="record to LOGFILE, naming convention is log_mmdd_HHMM.txt", metavar="LOGFILE")
+    parser.add_option("-p", "--pool", dest="pool", type="int", default=5, 
+                      help="allow maximum of NUM process(es) to run simultaneously", 
+                      metavar="NUM")
+#     parser.add_option("-r", "--restart", dest ="restart", action="store_true", default=False,
+#                       help="restart unfinished jobs by comparing FILE and LOGFILE")
+#     parser.add_option("-t", "--time", dest="time", action="store_true", default=False,
+#                       help="timing in detail by '/usr/bin/time -v'")
+    parser.add_option("--print", dest="printOnly", action="store_true", default=False,
+                      help="print commands only, but will not run them")
+    parser.add_option("--replace", dest="replace", action="store_true", default=False,
+                      help="replace log file instead of appending")
+    return parser
+
+
+def getCommandList(file):
+    cmd = []
+    if (file != "-"):
+        f = open(file)
+    else:
+        f = sys.stdin
+    for i in f:
+        i = i.strip()
+        if (len(i)==0): # skip empty lines
+            continue
+        if (i[0]=='#'): # skip comment lines
+            continue
+
+        if (i[-1]=='&'):# add it to the list
+            cmd.append(i[:-1].strip())
+        else:
+            cmd.append(i.strip())
+    if (file != "-"):
+        f.close()
+    return cmd
+
+# def getFinishedCommandList(file):
+#     cmd = []
+#     f = open(file)
+#     f.close()
+#     return
+
+# def getUnfinishedCommandList(finishedList, allList):
+#     return 
+
+def printEntry(file, tag, pid, cmd):
+    t = time.strftime("%Y/%m/%d %H:%M:%S")
+    file.write("[%s]\t[%s]\t[%d]\t[%s]\n" % (t, tag, pid, cmd))
+    file.flush()
+    os.fsync(file.fileno())
+    
+def printCompleteEntry(file, tag, pid, cmd, exitcode, elapsedTime):
+    t = time.strftime("%Y/%m/%d %H:%M:%S")
+    file.write("[%s]\t[%s]\t[%d]\t[%s]\t[%d]\t[%.3lfs]\n" % (t, tag, pid, cmd, exitcode, elapsedTime))
+    file.flush()
+    os.fsync(file.fileno())
+
+def runCommand(cmd):
+    import sys
+#    pid = multiprocessing.current_process().pid
+#    print("in %s and pid is %d " % (cmd, pid) )
+
+    time.sleep(opt.delay)
+#    time.sleep(random.randint(2,4))
+    ret = os.system(cmd)
+##("pid %d finished" % pid )
+    #print "ret code = ", ret
+    retcode = ret >> 8
+    signalcode = ret & 0xff
+    if signalcode != 0:
+	sys.exit( signalcode + 128 )
+    else:
+	sys.exit( retcode )
+
+if __name__ == '__main__':
+    parser = getParser()
+    (opt, args) = parser.parse_args()
+    
+# Log File Format
+# [Time] [Issue] [PID] [Stamp] [Command] [ExitCode] [ElapsedTime]
+# E.g.
+# [Time] <- [2010/01/06 18:48:47]
+# [Issue] <- [Issue] or [Complete] or [PARALLEL_BEGIN] or [PARALLEL_END]
+# [pid] <- [Process ID]
+# [Stamp] <- [STAMP######] STAMP followed by random numbers
+# [Command] <- [Command to run] 
+# [ExitCode] <- only displayed for completed jobs
+# [ElapsedTime] <- only displayed for completed jobs
+
+    # Open log file with given name
+    if (opt.logFileName == None):
+        opt.logFileName = "log"+time.strftime("_%m%d_%H%M")+".txt"
+    if (opt.replace != True):
+        log = open(opt.logFileName,"a")
+    else:
+        log = open(opt.logFileName, "w")
+
+    # Obtain task lists
+    task = getCommandList(opt.fileName)
+    for i in args:
+        task.extend(getCommandList(i))
+
+    if (opt.printOnly == True):
+        for i in task:
+            print i
+        sys.exit(0)
+
+    # Begin runnning jobs
+    process = [multiprocessing.Process(target=runCommand, args= (t,)) for t in task]
+    taskBeginTime = time.time()
+    taskLength = len(task)
+
+    currentTask = 0 # record the index of which task to go
+    finishedTask = 0 # record how many task not been run
+    activeProcessList = []
+    activeTaskList = [] # store user provided tasks
+    activeTimeList = [] # store beginning time for active processes
+    activeIdxList = []  # store the index of jobs
+    failedTaskList = [] # store all tasks with non-zero return code
+
+    currentPID = os.getpid()
+    printEntry (log, "BEGIN", currentPID, " ".join(sys.argv))
+
+    while (finishedTask < taskLength ):
+        if (currentTask < taskLength and len(activeProcessList) < opt.pool ):
+            print "Issue process [%d/%d] %s" % (currentTask + 1, taskLength, task[currentTask])
+            process[currentTask].start()
+            printEntry (log, "Issue", process[currentTask].pid, task[currentTask])
+
+            activeProcessList.append( process[currentTask] )
+            activeTaskList.append( task[currentTask] )
+            activeTimeList.append( time.time() )	    
+	    activeIdxList.append( currentTask + 1)
+	    
+            currentTask += 1
+        try:
+            length = len(activeProcessList)
+            for i in xrange(length):
+                if not activeProcessList[i].is_alive():
+		    elapsedTime = time.time() - activeTimeList[i]
+                    print "Process finish [%d/%d] [[%.3lfs] %s" % (activeIdxList[i], taskLength, elapsedTime, activeTaskList[i] )
+                    printCompleteEntry (log, "Complete", activeProcessList[i].pid,  \
+                                        activeTaskList[i], activeProcessList[i].exitcode, \
+                                        elapsedTime)
+                    finishedTask += 1
+
+                    #print "exit code of %d is %d" % (i, activeProcessList[i].exitcode)
+                    if (activeProcessList[i].exitcode != 0 # killed by signal
+			or activeProcessList[i].exitcode >> 8 != 0 # return is non-zero
+			):
+                        failedTaskList.append( activeTaskList[i] )
+                    del activeProcessList[i]
+                    del activeTaskList[i]
+                    del activeTimeList[i]
+		    del activeIdxList[i]
+
+
+
+                    break
+        except IndexError:
+            print "Wrong index", i, len(activeProcessList), activeTaskList
+        time.sleep(1)
+
+    printEntry (log, "END", currentPID, " ".join(sys.argv))
+
+    log.close()
+
+    print "#######  %d jobs have return code zero; %d jobs have return code non-zero: (listed below)  #######" % (taskLength - len(failedTaskList), len(failedTaskList))
+    for i in failedTaskList:
+        print i
+
+    taskEndTime = time.time()
+    taskDuration = taskEndTime - taskBeginTime
+    print "#######  parallel finished. %d commands  Total time was %d secs #######" % (taskLength, taskDuration)
